@@ -1,0 +1,12 @@
+scene:
+  name: lego
+
+fog:
+  enabled: true
+  density: 0.03
+  color: [0.8, 0.8, 0.8]
+  region: global
+
+training:
+  optimize_fog: true
+  optimize_surface: false
