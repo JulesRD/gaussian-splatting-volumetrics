@@ -31,10 +31,15 @@ def main():
     print("--- Part 1: Data & Model Initialization Demo ---")
     
     # 1. Load Dataset
-    print("\n1. Loading Dataset (Dummy Data)...")
-    dataset_path = "dummy_data" # Using the dummy data we created earlier
+    if len(sys.argv) > 1:
+        dataset_path = sys.argv[1]
+    else:
+        dataset_path = "dummy_data"
+        
+    print(f"\n1. Loading Dataset ({dataset_path})...")
+    
     if not os.path.exists(dataset_path):
-        print(f"Error: {dataset_path} not found. Please run the tests first to generate it.")
+        print(f"Error: {dataset_path} not found.")
         return
 
     dataset = BlenderDataset(dataset_path, split="train")
