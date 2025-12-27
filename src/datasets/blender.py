@@ -5,81 +5,80 @@ from PIL import Image
 from typing import NamedTuple
 from torch.utils.data import Dataset
 
+
 class BasicPointCloud(NamedTuple):
-    points: np.array
-    colors: np.array
-    normals: np.array
+    points: np.ndarray
+    colors: np.ndarray
+    normals: np.ndarray
+
 
 class CameraInfo(NamedTuple):
     uid: int
-    R: np.array
-    T: np.array
+    R: np.ndarray        # (3, 3) world-to-camera rotation
+    T: np.ndarray        # (3,)   world-to-camera translation
     FovY: float
     FovX: float
-    image: np.array
+    image: np.ndarray
     image_path: str
     image_name: str
     width: int
     height: int
 
-class BlenderDataset(Dataset):
-    def __init__(self, data_path, split="train", white_background=False):
-        self.data_path = data_path
-        self.split = split
-        self.white_background = white_background
-        
-        try:
-            with open(os.path.join(self.data_path, f"transforms_{split}.json"), 'r') as f:
-                self.meta = json.load(f)
-        except FileNotFoundError:
-             # Fallback if specific split json doesn't exist, try generic or assume folder structure
-             print(f"Warning: transforms_{split}.json not found. Checking for transforms.json")
-             with open(os.path.join(self.data_path, "transforms.json"), 'r') as f:
-                self.meta = json.load(f)
 
-        self.camera_angle_x = self.meta.get("camera_angle_x", 1.0)
+class BlenderDataset(Dataset):
+    def __init__(self, data_path, white_background=False):
+        self.data_path = data_path
+        self.white_background = white_background
+
+        transforms_path = os.path.join(self.data_path, "transforms.json")
+        if not os.path.exists(transforms_path):
+            raise FileNotFoundError(f"transforms.json not found in {data_path}")
+
+        with open(transforms_path, "r") as f:
+            self.meta = json.load(f)
+
+        self.camera_angle_x = self.meta["camera_angle_x"]
         self.frames = self.meta["frames"]
-        
-        # Load all cameras
+
         self.cameras = []
         for idx, frame in enumerate(self.frames):
-            cam_info = self.read_camera(idx, frame)
-            self.cameras.append(cam_info)
+            self.cameras.append(self.read_camera(idx, frame))
 
     def read_camera(self, idx, frame):
-        filepath = os.path.join(self.data_path, frame["file_path"] + ".png")
-        if not os.path.exists(filepath):
-             # Try without extension or different extension if needed, but standard is .png
-             filepath = os.path.join(self.data_path, frame["file_path"])
-        
-        # Image Loading
-        image = Image.open(filepath)
-        im_data = np.array(image.convert("RGBA"))
-        
-        # Background handling
-        bg = np.array([1,1,1]) if self.white_background else np.array([0,0,0])
-        
-        norm_data = im_data / 255.0
-        arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-        image = Image.fromarray(np.array(arr*255.0, dtype=np.uint8), "RGB")
-        
-        width, height = image.size
+        # ---------- Image loading ----------
+        image_path = os.path.join(self.data_path, frame["file_path"])
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(image_path)
+
+        image = Image.open(image_path)
+
+        # Handle RGB / RGBA safely
+        if image.mode == "RGBA":
+            rgba = np.array(image).astype(np.float32) / 255.0
+            rgb = rgba[..., :3]
+            alpha = rgba[..., 3:4]
+            bg = np.ones((1, 1, 3)) if self.white_background else np.zeros((1, 1, 3))
+            rgb = rgb * alpha + bg * (1.0 - alpha)
+            image = (rgb * 255).astype(np.uint8)
+        else:
+            image = np.array(image.convert("RGB"))
+
+        height, width = image.shape[:2]
+
+        # ---------- FOV ----------
         FovX = self.camera_angle_x
-        FovY = 2 * np.arctan(np.tan(self.camera_angle_x / 2) * height / width)
-        
-        # Matrix parsing
-        # NeRF 'transform_matrix' is Camera-to-World. 
-        # Gaussian Splatting usually expects World-to-Camera (View Matrix).
-        c2w = np.array(frame["transform_matrix"])
-        
-        # Coordinate conversion: OpenGL (NeRF) to OpenCV (Gaussian Splatting internal often uses this)
-        # NeRF: +X Right, +Y Up, +Z Back (cam looks -Z)
-        # We want to maintain consistency. Let's store C2W and handle inversion in the Camera class later
-        # or invert here. Standard 3DGS implementations invert here.
-        
-        # Inverting C2W to W2C
+        FovY = 2.0 * np.arctan(
+            np.tan(FovX * 0.5) * height / width
+        )
+
+        # ---------- Camera matrix ----------
+        # NeRF gives camera-to-world
+        c2w = np.array(frame["transform_matrix"], dtype=np.float32)
+
+        # Convert to world-to-camera
         w2c = np.linalg.inv(c2w)
-        R = np.transpose(w2c[:3,:3])  # R is stored transposed usually for shader usage
+
+        R = w2c[:3, :3]
         T = w2c[:3, 3]
 
         return CameraInfo(
@@ -88,11 +87,11 @@ class BlenderDataset(Dataset):
             T=T,
             FovY=FovY,
             FovX=FovX,
-            image=np.array(image),
-            image_path=filepath,
-            image_name=frame["file_path"],
+            image=image,
+            image_path=image_path,
+            image_name=os.path.basename(frame["file_path"]),
             width=width,
-            height=height
+            height=height,
         )
 
     def __len__(self):
@@ -101,27 +100,42 @@ class BlenderDataset(Dataset):
     def __getitem__(self, idx):
         return self.cameras[idx]
 
-    def get_point_cloud(self):
-        # Generate random point cloud inside the bounding box of the cameras
-        # This is a fallback if no ply is available
+    def get_point_cloud(self, num_pts=100_000):
+        """
+        Fallback point cloud initialization.
+        Samples points in the bounding box of camera centers.
+        """
         print("Generating random point cloud...")
-        num_pts = 100_000
-        # Determine bounding box from cameras
+
         centers = []
         for cam in self.cameras:
-            # T is from w2c, we need c2w center
-            # w2c = [R | T] -> c2w = [R.T | -R.T * T]
-            # Center is -R.T * T
-            R = cam.R.T # Transpose back to normal rotation
-            T = cam.T
-            center = -R.T @ T
+            # Camera center in world coordinates:
+            # C = -R^T T
+            center = -cam.R.T @ cam.T
             centers.append(center)
-        
-        centers = np.array(centers)
-        min_bound = np.min(centers, axis=0) - 0.5
-        max_bound = np.max(centers, axis=0) + 0.5
-        
-        xyz = np.random.random((num_pts, 3)) * (max_bound - min_bound) + min_bound
-        rgb = np.random.random((num_pts, 3)) # Random colors
-        
-        return BasicPointCloud(points=xyz, colors=rgb, normals=np.zeros((num_pts, 3)))
+
+        centers = np.stack(centers, axis=0)
+
+        min_bound = centers.min(axis=0) - 0.5
+        max_bound = centers.max(axis=0) + 0.5
+
+        xyz = np.random.uniform(min_bound, max_bound, size=(num_pts, 3))
+        rgb = np.random.uniform(0.0, 1.0, size=(num_pts, 3))
+        normals = np.zeros_like(xyz)
+
+        return BasicPointCloud(
+            points=xyz,
+            colors=rgb,
+            normals=normals
+        )
+
+
+"""
+# Example usage
+dataset = BlenderDataset("data/forest_other_angle")
+
+cam = dataset[0]
+print("Image shape:", cam.image.shape)
+print("FOV X (deg):", np.degrees(cam.FovX))
+print("Camera center:", -cam.R.T @ cam.T)
+"""
