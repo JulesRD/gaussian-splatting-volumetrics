@@ -26,13 +26,14 @@ class CameraInfo(NamedTuple):
 
 
 class BlenderDataset(Dataset):
-    def __init__(self, data_path, white_background=False):
+    def __init__(self, data_path, white_background=False, split="train"):
         self.data_path = data_path
         self.white_background = white_background
+        self.split = split
 
-        transforms_path = os.path.join(self.data_path, "transforms.json")
+        transforms_path = os.path.join(self.data_path, f"transforms_{split}.json")
         if not os.path.exists(transforms_path):
-            raise FileNotFoundError(f"transforms.json not found in {data_path}")
+            raise FileNotFoundError(f"transforms_{split}.json not found in {data_path}")
 
         with open(transforms_path, "r") as f:
             self.meta = json.load(f)
