@@ -86,6 +86,16 @@ class GaussianSet(nn.Module):
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
 
+    def load_checkpoint(self, state_dict):
+        device = next(self.parameters(), torch.empty(0)).device
+
+        self._xyz = nn.Parameter(state_dict["_xyz"].to(device))
+        self._features_dc = nn.Parameter(state_dict["_features_dc"].to(device))
+        self._features_rest = nn.Parameter(state_dict["_features_rest"].to(device))
+        self._scaling = nn.Parameter(state_dict["_scaling"].to(device))
+        self._rotation = nn.Parameter(state_dict["_rotation"].to(device))
+        self._opacity = nn.Parameter(state_dict["_opacity"].to(device))
+
 # Placeholder helper functions - normally these would be in utils or CUDA kernels
 def build_scaling_rotation(s, r):
     # Placeholder: In a real impl this constructs the 3x3 matrix
