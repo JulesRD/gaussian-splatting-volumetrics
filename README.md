@@ -35,19 +35,34 @@ export PYTHONPATH=$PYTHONPATH:.
 python3 src/scripts/part1_demo.py data/nerf_synthetic/lego
 ```
 
-### 4. Train a scene
+### 4. Volumetric Fog Training Workflow
+
+We recommend a 2-stage process for high-quality geometric separation between the object and the fog.
+
+#### Step 1: Train Clean Surface
+First, train the base object without any fog to get sharp geometry.
 ```bash
-python src/scripts/train.py --num_iter 7000 --stop_dense_after 7000 --dense_th 0.0002 --min_opacity 0.01 --reset_interval 3000 --data_path data/drjohnson
+python src/scripts/train_volumetric.py --data_path data/nerf_synthetic/lego --output_path outputs/checkpoints/lego_clean_base --disable_fog
 ```
 
-with volumetrics:
+#### Step 2: Volumetric Fog Insertion
+Now, freeze the surface geometry and force the model to learn a fog volume by simulating a foggy environment (blending training images with white).
 ```bash
-python src/scripts/train_volumetric.py --num_iter 7000 --stop_dense_after 7000 --init_points 50000 --dense_th 0.0002 --min_opacity 0.01 --reset_interval 3000 --data_path data/nerf_synthetic/lego
+python src/scripts/train_volumetric.py --data_path data/nerf_synthetic/lego --output_path outputs/checkpoints/lego_fog_final --pretrained_surface outputs/checkpoints/lego_clean_base/surface_final.pth --lock_surface --simulate_fog
 ```
 
-then generate the `.ply` file:
+### 5. Rendering & Comparisons
+
+Generate a side-by-side comparison (Clean vs Fog 2x vs Fog 4x):
 ```bash
-python src/scripts/export_ply.py --checkpoint outputs/checkpoints/drjohnson/gaussians_final_7000_761557.pth --output outputs/point_cloud/drjohnson.ply
+python src/scripts/render_volumetric.py --data_path data/nerf_synthetic/lego --surface_ckpt outputs/checkpoints/lego_clean_base/surface_final.pth --fog_ckpt outputs/checkpoints/lego_fog_final/fog_final.pth --output outputs/renders/comparison.gif --mode compare --compare_scales 2.0 4.0 --duration_ms 200
+```
+
+### 6. Export to PLY (Web Viewer Compatible)
+
+Export the combined scene. Use `--prune_threshold` to remove invisible low-density fog points that clog up web viewers.
+```bash
+python src/scripts/export_ply.py --checkpoint outputs/checkpoints/lego_clean_base/surface_final.pth --fog_checkpoint outputs/checkpoints/lego_fog_final/fog_final.pth --output outputs/exports/lego_foggy.ply --fog_opacity_scale 3.0 --prune_threshold 0.05
 ```
 
 with volumetrics:
