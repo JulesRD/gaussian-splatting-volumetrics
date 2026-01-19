@@ -60,6 +60,11 @@ python src/scripts/export_ply.py --checkpoint outputs/checkpoints/lego_volumetri
 After running the training, a `.ply` file is generated in the `point_cloud` directory.
 - Open this file in any 3DGS viewer (ex. https://storysplat.com/editor), **Blender** with Gaussian Splatting addon
 
+It is possible to generate the generation timeline:
+```bash
+python src/scripts/progression.py data/truck --checkpoints outputs/checkpoints/truck --out outputs/renders/truck.gif --camera 6
+```
+
 ## Project Structure
 - `src/models`: Core Gaussian and Volumetric definitions.
 - `src/datasets`: Data loaders (Blender/NeRF format).

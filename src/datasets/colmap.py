@@ -226,29 +226,32 @@ class ColmapDataset(Dataset):
         # Use actual image dimensions to avoid mismatches
         height, width = image.shape[:2]
 
+        scale_x = width / cam_data.width
+        scale_y = height / cam_data.height
+
         # Intrinsics
         cx = width / 2
         cy = height / 2
         if cam_data.model == "PINHOLE" or cam_data.model == "OPENCV":
-            fx = cam_data.params[0]
-            fy = cam_data.params[1]
-            cx = cam_data.params[2]
-            cy = cam_data.params[3]
+            fx = cam_data.params[0] * scale_x
+            fy = cam_data.params[1] * scale_y
+            cx = cam_data.params[2] * scale_x
+            cy = cam_data.params[3] * scale_y
         elif cam_data.model == "SIMPLE_PINHOLE":
-            fx = cam_data.params[0]
-            fy = cam_data.params[0]
-            cx = cam_data.params[1]
-            cy = cam_data.params[2]
+            fx = cam_data.params[0] * scale_x
+            fy = cam_data.params[0] * scale_y
+            cx = cam_data.params[1] * scale_x
+            cy = cam_data.params[2] * scale_y
         elif cam_data.model == "SIMPLE_RADIAL":
-            fx = cam_data.params[0]
-            fy = cam_data.params[0]
-            cx = cam_data.params[1]
-            cy = cam_data.params[2]
+            fx = cam_data.params[0] * scale_x
+            fy = cam_data.params[0] * scale_y
+            cx = cam_data.params[1] * scale_x
+            cy = cam_data.params[2] * scale_y
         elif cam_data.model == "RADIAL":
-            fx = cam_data.params[0]
-            fy = cam_data.params[0]
-            cx = cam_data.params[1]
-            cy = cam_data.params[2]
+            fx = cam_data.params[0] * scale_x
+            fy = cam_data.params[0] * scale_y
+            cx = cam_data.params[1] * scale_x
+            cy = cam_data.params[2] * scale_y
         else:
             print(
                 f"Warning: Unhandled camera model {cam_data.model}, using width/FOV guess"
