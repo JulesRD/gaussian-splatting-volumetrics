@@ -5,7 +5,9 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 
 # Add project root to path
-sys.path.append(os.getcwd())
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(project_root)
 
 from src.datasets.blender import BlenderDataset
 from src.models.gaussians import GaussianSet

@@ -153,12 +153,13 @@ class FogRegularizationLoss(nn.Module):
         Returns:
             Sparsity loss on fog density (scalar)
         """
-        if volume_gaussians is None or volume_gaussians._xyz.shape[0] == 0:
-            return torch.tensor(0.0, device=volume_gaussians._xyz.device if volume_gaussians else torch.device('cpu'))
+        if volume_gaussians is None or volume_gaussians.get_xyz.shape[0] == 0:
+            return torch.tensor(0.0, device=volume_gaussians.get_xyz.device if volume_gaussians else torch.device('cpu'))
         
         # L1 penalty on density to encourage sparsity
-        density = volume_gaussians._density
-        sparsity_loss = torch.abs(density).mean()
+        # Use get_density (or get_opacity) which returns the physical [0,1] value
+        density = volume_gaussians.get_density
+        sparsity_loss = torch.mean(density)
         
         return self.lambda_density * sparsity_loss
 

@@ -1,55 +1,47 @@
+import argparse
 import os
+import sys
+import csv
 from typing import NamedTuple
 import torch
 import numpy as np
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-import csv
+
+# Add project root to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(project_root)
 
 from src.datasets.blender import BlenderDataset
 from src.datasets.colmap import ColmapDataset
 from src.models.gaussians import GaussianSet
+from src.models.volumetric import VolumetricGaussianSet
 from src.rendering.rasterizer import render_gaussians
-from src.training.losses import PhotometricLoss, FogRegularizationLoss
+from src.training.losses import PhotometricLoss
 
-import argparse
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--num_iter", required=False, type=int)
-parser.add_argument("--stop_dense_after", required=False, type=int)
-parser.add_argument("--init_points", required=False, type=int)
-parser.add_argument("--reset_interval", required=False, type=int)
-parser.add_argument("--data_path", required=False, type=str)
-parser.add_argument("--dense_th", required=False, type=float)
-parser.add_argument("--min_opacity", required=False, type=float)
+# ----------------------------
+# Arguments
+# ----------------------------
+parser = argparse.ArgumentParser(description="Train Volumetric Gaussian Splatting")
+parser.add_argument("--data_path", required=True, type=str, help="Path to dataset")
+parser.add_argument("--output_path", type=str, default=None, help="Custom output directory")
+parser.add_argument("--iterations", dest="num_iter", type=int, default=30_000)
+parser.add_argument("--save_interval", type=int, default=7000)
+parser.add_argument("--init_points", type=int, default=5000)
+parser.add_argument("--fog_reg", type=float, default=0.0001, help="Fog density regularization")
+parser.add_argument("--fog_grid_size", type=int, default=32, help="Initial voxel grid size")
+parser.add_argument("--simulate_fog", action="store_true", help="Blend training images with white to force fog learning")
+parser.add_argument("--lock_surface", action="store_true", help="Freeze surface gaussians")
+parser.add_argument("--disable_fog", action="store_true", help="Train only surface")
+parser.add_argument("--pretrained_surface", type=str, default=None, help="Path to pretrained surface checkpoint")
 args = parser.parse_args()
 
 # ----------------------------
-# Configuration
+# Constants & Config
 # ----------------------------
-
-DATA_PATH = args.data_path if args.data_path else "data/nerf_synthetic/lego"
-OUTPUT_DIR = "outputs"
-NUM_POINTS = args.init_points if args.init_points else 5_000
-NUM_ITERS = args.num_iter if args.num_iter else 15_000
-SAVE_INTERVAL = 100
-
-dataset_name = os.path.basename(DATA_PATH)
-CHECKPOINT_PATH = f"{OUTPUT_DIR}/checkpoints/{dataset_name}_volumetric"
-
-# ----------------------------
-# Utilities
-# ----------------------------
-
-def image_to_tensor(img):
-    return torch.from_numpy(img).float().permute(2, 0, 1)
-
-def setup_dirs():
-    os.makedirs(CHECKPOINT_PATH, exist_ok=True)
-
-# ----------------------------
-# Training Args
-# ----------------------------
+DATA_PATH = args.data_path
+NUM_ITERS = args.num_iter
+CHECKPOINT_PATH = args.output_path or f"outputs/checkpoints/{os.path.basename(os.path.normpath(DATA_PATH))}_volumetric"
 
 class TrainingArgs(NamedTuple):
     percent_dense: float = 0.01
@@ -59,24 +51,24 @@ class TrainingArgs(NamedTuple):
     scaling_lr: float = 0.005
     rotation_lr: float = 0.001
     densify_from_iter: int = 500
-    densify_until_iter: int = args.stop_dense_after if args.stop_dense_after else 10_000
+    densify_until_iter: int = 15_000
     densification_interval: int = 100
-    opacity_reset_interval: int = args.reset_interval if args.reset_interval else 3000
-    densify_grad_threshold: float = args.dense_th if args.dense_th else 0.0002
-    min_opacity: float = args.min_opacity if args.min_opacity else 0.005
+    opacity_reset_interval: int = 3000
+    densify_grad_threshold: float = 0.0002
+    min_opacity: float = 0.005
 
-# ----------------------------
-# Training Loop
-# ----------------------------
+def image_to_tensor(img):
+    return torch.from_numpy(img).float().permute(2, 0, 1)
 
 def train():
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    
+    os.makedirs(CHECKPOINT_PATH, exist_ok=True)
+    with open(os.path.join(CHECKPOINT_PATH, "config.txt"), "w") as f:
+        for k, v in vars(args).items(): f.write(f"{k}: {v}\n")
 
-    setup_dirs()
-
+    # 1. Load Dataset
     print("Loading dataset...")
     if os.path.exists(os.path.join(DATA_PATH, "transforms_train.json")) or os.path.exists(os.path.join(DATA_PATH, "transforms.json")):
         dataset = BlenderDataset(DATA_PATH)
@@ -85,148 +77,148 @@ def train():
         dataset = ColmapDataset(DATA_PATH)
         camera_convention = "opencv"
     else:
-        raise ValueError(f"No valid dataset found in {DATA_PATH}. Expected transforms.json or sparse/0/.")
+        raise ValueError("Unknown dataset format")
 
-    # Calculate scene extent
-    cam_centers = []
-    for cam in dataset.cameras:
-        if cam is not None:
-             cam_centers.append(-cam.R.T @ cam.T)
-    
-    if len(cam_centers) > 0:
-        world_centers = np.stack(cam_centers, axis=0)
-        scene_center = np.mean(world_centers, axis=0)
-        dists = np.linalg.norm(world_centers - scene_center, axis=1)
-        scene_radius = np.percentile(dists, 90) * 1.1
-    else:
-        scene_center = np.zeros(3)
-        scene_radius = 1.0
-
-    print(f"Computed Scene Radius: {scene_radius:.4f}")
-    adaptive_zfar = max(100.0, scene_radius * 2.0)
-
-    # 1. Surface Gaussians
+    # 2. Compute Scene Bounds (Adaptive)
     print("Initializing Surface Gaussians...")
-    pcd = dataset.get_point_cloud(NUM_POINTS)
+    pcd = dataset.get_point_cloud(args.init_points)
+    pcd_xyz = torch.tensor(pcd.points).float()
+    pcd_min, pcd_max = pcd_xyz.min(dim=0)[0], pcd_xyz.max(dim=0)[0]
+    scene_center = (pcd_min + pcd_max) / 2.0
+    scene_radius = (pcd_max - pcd_min).max() / 2.0
+    print(f"Scene Radius: {scene_radius:.4f}")
+
+    # 3. Setup Surface Model
     gaussians = GaussianSet(sh_degree=0)
-    gaussians.create_from_pcd(pcd, spatial_lr_scale=float(scene_radius))
+    if args.pretrained_surface and os.path.exists(args.pretrained_surface):
+        print(f"Loading surface from {args.pretrained_surface}...")
+        state = torch.load(args.pretrained_surface, map_location=device)
+        try:
+            gaussians.load_state_dict(state)
+        except RuntimeError:
+             # Fallback for manual parameter assignment
+             for k in ["_xyz", "_features_dc", "_features_rest", "_scaling", "_rotation", "_opacity"]:
+                 if k in state: setattr(gaussians, k, torch.nn.Parameter(state[k]))
+        gaussians.to(device)
+    else:
+        gaussians.create_from_pcd(pcd, spatial_lr_scale=float(scene_radius))
     
-    args = TrainingArgs()
-    gaussians.training_setup(args)
+    opt = TrainingArgs()
+    if args.lock_surface:
+        print("Freezing Surface Model.")
+        gaussians.training_setup(opt)
+        gaussians.optimizer = None 
+    else:
+        gaussians.training_setup(opt)
 
-    # 2. Volume Gaussians (The Fog)
-    print("Initializing Volumetric Fog...")
-    fog_gaussians = GaussianSet(sh_degree=0)
-    # Initialize grid covering the scene
-    fog_gaussians.create_from_grid(
-        center=scene_center,
-        radius=scene_radius * 1.5, # Slightly larger to cover bounds
-        grid_size=32,
-        fog_density=0.01,
-        fog_color=(0.9, 0.9, 0.95)
-    )
-    
-    # Fog Optimizer (Optimizing only opacity/color mostly, static structure)
-    fog_args = TrainingArgs(
-        position_lr_init=0.000016, # Allow small movement to break grid
-        opacity_lr=0.05, 
-        feature_lr=0.005,
-        scaling_lr=0.001, # Allow slight reshaping
-        rotation_lr=0.0
-    )
-    fog_gaussians.training_setup(fog_args)
+    # 4. Setup Fog Model
+    fog_gaussians = None
+    if not args.disable_fog:
+        print("Initializing Volumetric Fog...")
+        fog_gaussians = VolumetricGaussianSet(sh_degree=0)
+        fog_gaussians.create_from_grid(
+            center=scene_center.to(device),
+            radius=scene_radius.item() * 1.5, 
+            grid_size=args.fog_grid_size
+        )
+        # Use higher learning rates for fluid structure
+        fog_args = TrainingArgs(position_lr_init=0.0016, opacity_lr=0.05, feature_lr=0.005)
+        fog_gaussians.training_setup(fog_args)
 
-    bg_color = torch.zeros(3, device=device)
     loss_fn = PhotometricLoss(0.2)
-    
-    print("Starting training...")
-    
     log_file = os.path.join(CHECKPOINT_PATH, "training_log.csv")
     with open(log_file, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Iteration", "Loss", "SurfacePoints"])
+        csv.writer(f).writerow(["Iteration", "Loss", "SurfacePoints"])
 
+    # 5. Training Loop
+    print("Starting training...")
     bar = tqdm(range(1, NUM_ITERS + 1))
     
     for it in bar:
         cam = dataset[torch.randint(0, len(dataset), (1,)).item()]
-
-        # Load & Composite
-        gt_image = image_to_tensor(cam.image).to(device)
-        gt_rgb = gt_image[:3, :, :]
-        gt_alpha = gt_image[3:4, :, :]
-
-        rand_val = torch.rand(1).item()
-        if rand_val < 0.3: bg_color = torch.rand(3, device=device)
-        elif rand_val < 0.6: bg_color = torch.zeros(3, device=device)
-        else: bg_color = torch.ones(3, device=device)
         
+        # Prepare Target
+        gt_image = image_to_tensor(cam.image).to(device)
+        gt_rgb, gt_alpha = gt_image[:3], gt_image[3:4]
+        
+        # Random background
+        bg_color = torch.rand(3, device=device) if torch.rand(1) < 0.3 else (torch.zeros(3, device=device) if torch.rand(1) < 0.6 else torch.ones(3, device=device))
         target = gt_rgb * gt_alpha + bg_color[:, None, None] * (1.0 - gt_alpha)
 
-        gaussians.optimizer.zero_grad()
-        fog_gaussians.optimizer.zero_grad()
+        # Fog Simulation (Insertion Mode)
+        if args.simulate_fog:
+            fog_intensity = 0.3
+            fog_c = torch.ones_like(target) * 0.8 # Light gray
+            target = target * (1.0 - fog_intensity) + fog_c * fog_intensity
 
-        # Concatenate Parameters
-        combined_xyz = torch.cat([gaussians.get_xyz, fog_gaussians.get_xyz], dim=0)
-        combined_shs = torch.cat([gaussians.get_features, fog_gaussians.get_features], dim=0)
-        combined_opacity = torch.cat([gaussians.get_opacity, fog_gaussians.get_opacity], dim=0)
-        combined_scaling = torch.cat([gaussians.get_scaling, fog_gaussians.get_scaling], dim=0)
-        combined_rotation = torch.cat([gaussians.get_rotation, fog_gaussians.get_rotation], dim=0)
+        if gaussians.optimizer: gaussians.optimizer.zero_grad()
+        if fog_gaussians: fog_gaussians.optimizer.zero_grad()
 
-        # Render Unified Scene
+        # Combine Models
+        if fog_gaussians:
+            combined_xyz = torch.cat([gaussians.get_xyz, fog_gaussians.get_xyz], dim=0)
+            combined_shs = torch.cat([gaussians.get_features, fog_gaussians.get_features], dim=0)
+            combined_opacity = torch.cat([gaussians.get_opacity, fog_gaussians.get_opacity], dim=0)
+            combined_scaling = torch.cat([gaussians.get_scaling, fog_gaussians.get_scaling], dim=0)
+            combined_rotation = torch.cat([gaussians.get_rotation, fog_gaussians.get_rotation], dim=0)
+        else:
+            combined_xyz, combined_shs, combined_opacity, combined_scaling, combined_rotation = \
+                gaussians.get_xyz, gaussians.get_features, gaussians.get_opacity, gaussians.get_scaling, gaussians.get_rotation
+
+        # Render
         rendered, viewspace_point_tensor = render_gaussians(
-            gaussians=gaussians, # Pass object for sh_degree reference
-            camera=cam,
-            bg_color=bg_color,
-            convention=camera_convention,
-            means3D=combined_xyz,
-            shs=combined_shs,
-            opacities=combined_opacity,
-            scales=combined_scaling,
-            rotations=combined_rotation
+            gaussians=gaussians, camera=cam, bg_color=bg_color, convention=camera_convention,
+            means3D=combined_xyz, shs=combined_shs, opacities=combined_opacity, scales=combined_scaling, rotations=combined_rotation
         )
 
-        # Loss Calculation
-        photo_loss = loss_fn(rendered, target).to(device)
+        # Loss
+        loss = loss_fn(rendered, target).to(device)
+        if fog_gaussians:
+            loss += args.fog_reg * torch.abs(fog_gaussians.get_opacity).mean()
         
-        # Fog Regularization: Encourage sparsity/low density in fog volume
-        fog_reg = 0.001 * torch.abs(fog_gaussians.get_opacity).mean()
-        
-        loss = photo_loss + fog_reg
         loss.backward()
 
+        # Optimization & Densification
         with torch.no_grad():
-            # Densification (Surface Only)
             n_surface = gaussians.get_xyz.shape[0]
-            if it < args.densify_until_iter:
-                # Slice the gradient from the full tensor
-                surface_grad = viewspace_point_tensor.grad[:n_surface]
+            
+            # 1. Collect Stats
+            if it < opt.densify_until_iter:
+                if not args.lock_surface:
+                    grid = viewspace_point_tensor.grad[:n_surface]
+                    gaussians.add_densification_stats(grid, grid.norm(dim=-1) > 0)
+                if fog_gaussians:
+                    f_grid = viewspace_point_tensor.grad[n_surface:]
+                    fog_gaussians.add_densification_stats(f_grid, f_grid.norm(dim=-1) > 0)
+
+                # 2. Densify/Prune
+                if it > opt.densify_from_iter and it % opt.densification_interval == 0:
+                    if not args.lock_surface:
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.min_opacity, scene_radius*4.0, 20)
+                    if fog_gaussians:
+                        # Higher threshold for fog to prevent noise
+                        fog_gaussians.densify_and_prune(opt.densify_grad_threshold * 1.5, 0.001, scene_radius*4.0, None)
                 
-                gaussians.add_densification_stats(surface_grad, surface_grad.norm(dim=-1) > 0)
+                # 3. Opacity Reset
+                if it <= opt.densify_until_iter and it % opt.opacity_reset_interval == 0:
+                    if not args.lock_surface: gaussians.reset_opacity()
 
-                if it > args.densify_from_iter and it % args.densification_interval == 0:
-                    size_threshold = 20 if it > args.opacity_reset_interval else None
-                    gaussians.densify_and_prune(args.densify_grad_threshold, args.min_opacity, extent=scene_radius*4.0, max_screen_size=size_threshold)
-                
-                if it <= args.densify_until_iter and (it % args.opacity_reset_interval == 0 or (getattr(dataset, 'white_background', False) and it == args.densify_from_iter)):
-                    gaussians.reset_opacity()
+            if gaussians.optimizer: gaussians.optimizer.step()
+            if fog_gaussians: fog_gaussians.optimizer.step()
 
-            gaussians.optimizer.step()
-            fog_gaussians.optimizer.step()
-
-        if it % SAVE_INTERVAL == 0:
-            torch.save(gaussians.state_dict(), f"{CHECKPOINT_PATH}/surface_{it:05d}.pth")
-            torch.save(fog_gaussians.state_dict(), f"{CHECKPOINT_PATH}/fog_{it:05d}.pth")
-        
+        # Logging & Saving
         if it % 10 == 0:
-            bar.set_description(f"Iter: {it}, Loss: {loss.item():.4f}, SurfPts: {n_surface}")
+            bar.set_description(f"Iter: {it}, Loss: {loss.item():.4f}, Surf: {n_surface}")
             with open(log_file, "a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([it, loss.item(), n_surface])
+                csv.writer(f).writerow([it, loss.item(), n_surface])
 
+        if it % args.save_interval == 0:
+            if not args.lock_surface: torch.save(gaussians.state_dict(), f"{CHECKPOINT_PATH}/surface_{it:05d}.pth")
+            if fog_gaussians: torch.save(fog_gaussians.state_dict(), f"{CHECKPOINT_PATH}/fog_{it:05d}.pth")
+
+    print("Saving final checkpoints...")
     torch.save(gaussians.state_dict(), f"{CHECKPOINT_PATH}/surface_final.pth")
-    torch.save(fog_gaussians.state_dict(), f"{CHECKPOINT_PATH}/fog_final.pth")
+    if fog_gaussians: torch.save(fog_gaussians.state_dict(), f"{CHECKPOINT_PATH}/fog_final.pth")
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
     train()

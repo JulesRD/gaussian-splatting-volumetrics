@@ -10,12 +10,14 @@ class GaussianSet(nn.Module):
         self.max_sh_degree = sh_degree
 
         # Parameters (will be nn.Parameter)
-        self._xyz = torch.empty(0)
-        self._features_dc = torch.empty(0)
-        self._features_rest = torch.empty(0)
-        self._scaling = torch.empty(0)
-        self._rotation = torch.empty(0)
-        self._opacity = torch.empty(0)
+        # Note: These are initialized as empty but registered as parameters
+        # When checking strict=True in load_state_dict, it expects these to exist.
+        self._xyz = nn.Parameter(torch.empty(0))
+        self._features_dc = nn.Parameter(torch.empty(0))
+        self._features_rest = nn.Parameter(torch.empty(0))
+        self._scaling = nn.Parameter(torch.empty(0))
+        self._rotation = nn.Parameter(torch.empty(0))
+        self._opacity = nn.Parameter(torch.empty(0))
 
         # Optimizer hook
         self.optimizer = None

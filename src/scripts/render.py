@@ -2,7 +2,13 @@ import torch
 import numpy as np
 import open3d as o3d
 import os
+import sys
 from PIL import Image
+
+# Add project root to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(project_root)
 
 from src.datasets.blender import BlenderDataset
 from src. models.gaussians import GaussianSet

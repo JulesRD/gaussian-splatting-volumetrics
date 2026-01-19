@@ -1,13 +1,19 @@
 import argparse
 import os
+import sys
 from pathlib import Path
+
+# Add project root to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(project_root)
 
 import numpy as np
 import torch
 from PIL import Image
 
-from datasets.blender import BlenderDataset
-from rendering.rasterizer import render_gaussians
+from src.datasets.blender import BlenderDataset
+from src.rendering.rasterizer import render_gaussians
 from src.datasets.colmap import ColmapDataset
 from src.models.gaussians import GaussianSet
 
@@ -46,6 +52,10 @@ def main():
     frames = []
     gaussians = GaussianSet()
     checkpoints = sorted(Path(args.checkpoints).glob("*.pth"), key=os.path.getmtime)
+    # Filter checkpoints to only include surface_* or gaussians_* 
+    # and exclude fog_* as they have a different structure (density/phase_color)
+    checkpoints = [cp for cp in checkpoints if "surface" in cp.name or "gaussians" in cp.name and "fog" not in cp.name]
+    
     print('Loading checkpoints ...')
     for cp in checkpoints:
         state = torch.load(cp, map_location=device)
