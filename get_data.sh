@@ -7,7 +7,7 @@ rm data/nerf_example_data.zip
 
 wget https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip
 unzip tandt_db.zip
-mv tandt/truck data/
+mv tandt/* data/
 mv db/* data/
 rm -rf tandt db tandt_db.zip
 
