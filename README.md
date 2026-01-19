@@ -7,19 +7,23 @@ Extend Gaussian Splatting to model semi-transparent media (e.g. fog or smoke).
 ### 1. Setup Environment
 ```bash
 # Create virtual environment
-python3 -m venv venv
+python3 -m venv .venv
 # Activate
-source venv/bin/activate
+source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Download Real Data (Lego)
+or with uv
+
 ```bash
-mkdir -p data
-curl -L -o data/nerf_example_data.zip http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/nerf_example_data.zip
-unzip -q data/nerf_example_data.zip -d data/
-rm data/nerf_example_data.zip
+uv sync
+source .venv/bin/activate
+```
+
+### 2. Download Real Data (NeRF + COLMAP)
+```bash
+./get_data.sh
 ```
 
 ### 3. Run Part 1 Demo (Data & Initialization)
@@ -31,11 +35,30 @@ export PYTHONPATH=$PYTHONPATH:.
 python3 src/scripts/part1_demo.py data/nerf_synthetic/lego
 ```
 
+### 4. Train a scene
+```bash
+python src/scripts/train.py --num_iter 7000 --stop_dense_after 7000 --dense_th 0.0002 --min_opacity 0.01 --reset_interval 3000 --data_path data/drjohnson
+```
+
+with volumetrics:
+```bash
+python src/scripts/train_volumetric.py --num_iter 7000 --stop_dense_after 7000 --init_points 50000 --dense_th 0.0002 --min_opacity 0.01 --reset_interval 3000 --data_path data/nerf_synthetic/lego
+```
+
+then generate the `.ply` file:
+```bash
+python src/scripts/export_ply.py --checkpoint outputs/checkpoints/drjohnson/gaussians_final_7000_761557.pth --output outputs/point_cloud/drjohnson.ply
+```
+
+with volumetrics:
+```bash
+python src/scripts/export_ply.py --checkpoint outputs/checkpoints/lego_volumetric/surface_final.pth --fog_checkpoint outputs/checkpoints/lego_volumetric/fog_final.pth --output outputs/point_cloud/lego.ply
+```
+
+
 ### 4. Visualization
-After running the demo, an `initial_state.ply` file is generated in the root directory.
-- Open this file in **MeshLab**, **Blender**, or any 3D viewer.
-- You will see a 3D cloud of points (100,000 points) initialized within the camera frustums of the Lego scene.
-- Each point represents an initial Gaussian seed with position, color (SH), and opacity.
+After running the training, a `.ply` file is generated in the `point_cloud` directory.
+- Open this file in any 3DGS viewer (ex. https://storysplat.com/editor), **Blender** with Gaussian Splatting addon
 
 ## Project Structure
 - `src/models`: Core Gaussian and Volumetric definitions.

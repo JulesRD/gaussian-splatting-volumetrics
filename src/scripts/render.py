@@ -9,12 +9,19 @@ from src. models.gaussians import GaussianSet
 from src.rendering.rasterizer import render_gaussians
 
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--data_path', required=False, type=str)
+parser.add_argument('--checkpoint', required=False, type=str)
+parser.add_argument('-vis', required=False, action='store_true')
+args = parser.parse_args()
 # ----------------------------
 # Configuration
 # ----------------------------
 
-DATA_PATH = "data/forest"
-CHECKPOINT_PATH = "outputs/checkpoints/gaussians_00250.pth"
+DATA_PATH = args.data_path if args.data_path else "data/forest"
+CHECKPOINT_PATH = args.checkpoint if args.checkpoint else "outputs/checkpoints/gaussians_final.pth"
 OUTPUT_DIR = "outputs/renders"
 CAMERA_INDEX = 0
 
@@ -56,7 +63,7 @@ def render_checkpoint():
 
     print("Rendering...")
     with torch.no_grad():
-        image = render_gaussians(
+        image, _ = render_gaussians(
             gaussians=gaussians,
             camera=cam,
             bg_color=bg_color
@@ -81,11 +88,12 @@ def visualize_gaussians():
     # Extract data
     # ----------------------------
     xyz = gaussians.get_xyz.detach().cpu().numpy()
-    colors = gaussians.get_features[:, 0, :].detach().cpu().numpy()
+    shs = gaussians.get_features[:, 0, :].detach().cpu().numpy()
     opacity = gaussians.get_opacity.detach().cpu().numpy()
 
-    # Optional: opacity-weighted colors
-    colors = colors * opacity
+    # Convert SH DC to RGB
+    C0 = 0.28209479177387814
+    colors = shs * C0 + 0.5
 
     # ----------------------------
     # Open3D point cloud
@@ -104,6 +112,8 @@ def visualize_gaussians():
 
 
 if __name__ == "__main__":
-    #render_checkpoint()
-    visualize_gaussians()
+    if args.vis:
+        visualize_gaussians()
+    else:
+        render_checkpoint()
 

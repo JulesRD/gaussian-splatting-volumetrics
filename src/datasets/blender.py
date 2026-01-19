@@ -1,9 +1,14 @@
-import os
 import json
-import numpy as np
-from PIL import Image
+import math
+import os
 from typing import NamedTuple
+
+import numpy as np
+import torch
+from PIL import Image
 from torch.utils.data import Dataset
+
+from rendering import camera
 
 
 class BasicPointCloud(NamedTuple):
@@ -14,10 +19,14 @@ class BasicPointCloud(NamedTuple):
 
 class CameraInfo(NamedTuple):
     uid: int
-    R: np.ndarray        # (3, 3) world-to-camera rotation
-    T: np.ndarray        # (3,)   world-to-camera translation
+    R: np.ndarray  # (3, 3) world-to-camera rotation
+    T: np.ndarray  # (3,)   world-to-camera translation
     FovY: float
     FovX: float
+    fx: float
+    fy: float
+    cx: float
+    cy: float
     image: np.ndarray
     image_path: str
     image_name: str
@@ -47,7 +56,15 @@ class BlenderDataset(Dataset):
 
     def read_camera(self, idx, frame):
         # ---------- Image loading ----------
-        image_path = os.path.join(self.data_path, frame["file_path"])
+        clean_path = (
+            frame["file_path"][2:]
+            if len(frame["file_path"]) > 0 and frame["file_path"][:2] == "./"
+            else frame["file_path"]
+        )
+        if not clean_path.endswith(".png"):
+            clean_path += ".png"
+
+        image_path = os.path.join(self.data_path, clean_path)
         if not os.path.exists(image_path):
             raise FileNotFoundError(image_path)
 
@@ -56,21 +73,25 @@ class BlenderDataset(Dataset):
         # Handle RGB / RGBA safely
         if image.mode == "RGBA":
             rgba = np.array(image).astype(np.float32) / 255.0
-            rgb = rgba[..., :3]
-            alpha = rgba[..., 3:4]
-            bg = np.ones((1, 1, 3)) if self.white_background else np.zeros((1, 1, 3))
-            rgb = rgb * alpha + bg * (1.0 - alpha)
-            image = (rgb * 255).astype(np.uint8)
+            image = rgba  # Return RGBA
         else:
-            image = np.array(image.convert("RGB"))
+            image_rgb = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+            image = np.concatenate(
+                [image_rgb, np.ones_like(image_rgb[..., :1])], axis=-1
+            )
 
+        # Override dimensions with actual loaded image size
         height, width = image.shape[:2]
 
         # ---------- FOV ----------
         FovX = self.camera_angle_x
-        FovY = 2.0 * np.arctan(
-            np.tan(FovX * 0.5) * height / width
-        )
+        FovY = 2.0 * np.arctan(np.tan(FovX * 0.5) * height / width)
+
+        # ---------- Intrinsics ----------
+        fx = width / (2 * math.tan(FovX / 2))
+        fy = height / (2 * math.tan(FovY / 2))
+        cx = width / 2
+        cy = height / 2
 
         # ---------- Camera matrix ----------
         # NeRF gives camera-to-world
@@ -88,6 +109,10 @@ class BlenderDataset(Dataset):
             T=T,
             FovY=FovY,
             FovX=FovX,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
             image=image,
             image_path=image_path,
             image_name=os.path.basename(frame["file_path"]),
@@ -103,40 +128,56 @@ class BlenderDataset(Dataset):
 
     def get_point_cloud(self, num_pts=100_000):
         """
-        Fallback point cloud initialization.
-        Samples points in the bounding box of camera centers.
+        Frustum initialization.
+        Samples points in front of the cameras, ensuring they are visible.
+        This works for both object-centric and forward-facing scenes.
         """
-        print("Generating random point cloud...")
+        print(f"Generating point cloud in camera frustums ({num_pts} points)...")
 
-        centers = []
-        for cam in self.cameras:
-            # Camera center in world coordinates:
-            # C = -R^T T
-            center = -cam.R.T @ cam.T
-            centers.append(center)
+        xyz = []
+        rgb = []
 
-        centers = np.stack(centers, axis=0)
+        points_per_cam = max(1, num_pts // len(self.cameras))
 
-        min_bound = centers.min(axis=0) - 0.5
-        max_bound = centers.max(axis=0) + 0.5
+        for idx, frame in enumerate(self.frames):
+            # NeRF/Blender matrix is C2W
+            c2w = np.array(frame["transform_matrix"], dtype=np.float32)
 
-        xyz = np.random.uniform(min_bound, max_bound, size=(num_pts, 3))
-        rgb = np.random.uniform(0.0, 1.0, size=(num_pts, 3))
+            # Extract position and forward vector
+            cam_pos = c2w[:3, 3]
+
+            # Col 2 is "Back" in OpenGL (-Z is forward)
+            forward = -c2w[:3, 2]
+
+            # Also use Right/Up to spread points laterally
+            right = c2w[:3, 0]
+            up = c2w[:3, 1]
+
+            # Sample depths (e.g. 0.5 to 6.0 units in front)
+            depths = np.random.uniform(0.5, 6.0, size=(points_per_cam, 1))
+
+            # Sample lateral spread (frustum-like)
+            # Assuming FOV ~60 deg, tan(30) ~ 0.5
+            # Spread proportional to depth
+            spread_x = np.random.uniform(-0.5, 0.5, size=(points_per_cam, 1)) * depths
+            spread_y = np.random.uniform(-0.5, 0.5, size=(points_per_cam, 1)) * depths
+
+            # P = Pos + Depth * Forward + SpreadX * Right + SpreadY * Up
+            pts = cam_pos + depths * forward + spread_x * right + spread_y * up
+
+            xyz.append(pts)
+            # Random colors for now
+            rgb.append(np.random.uniform(0.0, 1.0, size=(points_per_cam, 3)))
+
+        xyz = np.concatenate(xyz, axis=0)
+        rgb = np.concatenate(rgb, axis=0)
+
+        # Subsample if we have too many
+        if xyz.shape[0] > num_pts:
+            indices = np.random.choice(xyz.shape[0], num_pts, replace=False)
+            xyz = xyz[indices]
+            rgb = rgb[indices]
+
         normals = np.zeros_like(xyz)
 
-        return BasicPointCloud(
-            points=xyz,
-            colors=rgb,
-            normals=normals
-        )
-
-
-"""
-# Example usage
-dataset = BlenderDataset("data/forest_other_angle")
-
-cam = dataset[0]
-print("Image shape:", cam.image.shape)
-print("FOV X (deg):", np.degrees(cam.FovX))
-print("Camera center:", -cam.R.T @ cam.T)
-"""
+        return BasicPointCloud(points=xyz, colors=rgb, normals=normals)

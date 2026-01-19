@@ -16,8 +16,9 @@ class Scene(nn.Module):
                                   ("mps" if torch.backends.mps.is_available() else "cpu"))
     
     def add_surface_gaussians(self, gaussian_set: GaussianSet) -> int:
-        if not isinstance(gaussian_set, GaussianSet):
-            raise TypeError("Expected GaussianSet instance")
+        # print(gaussian_set)
+        # if not isinstance(gaussian_set, GaussianSet):
+            # raise TypeError("Expected GaussianSet instance")
         self.surface_gaussians.append(gaussian_set)
         return len(self.surface_gaussians) - 1
     

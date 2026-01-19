@@ -108,14 +108,14 @@ class SSIMLoss(nn.Module):
 
 class PhotometricLoss(nn.Module):
     """
-    Combined photometric loss: L1 + λ_ssim * (1 - SSIM).
+    Combined photometric loss: (1-l) * L1 + λ_ssim * (1 - SSIM).
     
     This is commonly used in NeRF and Gaussian Splatting papers.
     """
     
-    def __init__(self, lambda_ssim=0.2):
+    def __init__(self, lambda_=0.2):
         super().__init__()
-        self.lambda_ssim = lambda_ssim
+        self.lambda_ = lambda_
         self.l1_loss = L1Loss()
         self.ssim_loss = SSIMLoss()
     
@@ -130,7 +130,7 @@ class PhotometricLoss(nn.Module):
         """
         l1 = self.l1_loss(rendered, target)
         ssim = self.ssim_loss(rendered, target)
-        return l1 + self.lambda_ssim * ssim
+        return (1 - self.lambda_) * l1 + self.lambda_ * ssim
 
 
 class FogRegularizationLoss(nn.Module):

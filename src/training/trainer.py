@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any
 import os
+from tqdm import tqdm
 
 from src.training.losses import TotalLoss
 from src.rendering.rasterizer import render_gaussians
@@ -187,9 +188,11 @@ class Trainer:
         print(f"Output directory: {self.output_dir}")
         
         # Iterate through data
+        print(dataloader[0])
         data_iter = iter(dataloader)
         
-        for it in range(1, num_iterations + 1):
+        bar = tqdm(range(1, num_iterations + 1))
+        for it in bar:
             self.iteration = it
             
             # Get next batch (cycle through dataset)
@@ -217,6 +220,7 @@ class Trainer:
             # Checkpointing
             if it % self.save_interval == 0:
                 self.save_checkpoint(f"iter_{it:05d}.pth")
+            bar.set_description(f"Iter: {it}, loss: {loss.item():.4f}")
         
         # Save final checkpoint
         self.save_checkpoint("final.pth")
